@@ -1,0 +1,31 @@
+{
+  "name": "solana-bot-worker-63b7",
+  "version": "0.0.0",
+  "private": true,
+  "main": "dist/worker.js",
+  "scripts": {
+    "build": "tsc && webpack",
+    "deploy": "wrangler deploy",
+    "watch": "wrangler dev",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@solana/web3.js": "1.91.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20240405.0",
+    "helius-sdk": "1.2.5",
+    "browserify-fs": "1.0.0",
+    "buffer": "6.0.3",
+    "crypto-browserify": "3.12.0",
+    "path-browserify": "1.0.1",
+    "process": "^0.11.10",
+    "stream-browserify": "3.0.0",
+    "typescript": "5.4.3",
+    "vitest": "1.4.0",
+    "vm-browserify": "1.1.2",
+    "webpack": "5.89.0",
+    "webpack-cli": "5.1.4",
+    "wrangler": "3.47.1"
+  }
+}

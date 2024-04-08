@@ -1,0 +1,19 @@
+name = "solana-bot-worker-63b7"
+main = "src/worker.ts"
+# main = "build/worker.js"
+compatibility_date = "2024-04-04"
+workers_dev = true
+compatibility_flags = [ "nodejs_compat" ]
+# type = "webpack"
+# webpack_config = "webpack.config.js"
+
+
+# [build]
+# command = "npm run build"
+# cwd = "build"
+# watch_dir = "build"
+
+[vars]
+TELEGRAM_CHAT_ID=6902486057
+MAX_SOL_BUY=30000000
+NODE_VERSION=20
