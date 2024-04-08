@@ -8,9 +8,11 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 
-// import { EnrichedTransaction, SwapEvent, TransactionType } from "helius-sdk";
+// import * as Raydium from '@raydium-io/raydium-sdk';
+import { Buffer } from 'node:buffer';
+import { EnrichedTransaction, SwapEvent, TransactionType } from "helius-sdk";
 import { Connection, VersionedTransaction, TransactionSignature, Keypair, BlockheightBasedTransactionConfirmationStrategy } from '@solana/web3.js';
-// import { DefaultApi, QuoteResponse, createJupiterApiClient } from '@jup-ag/api';
+import { DefaultApi, QuoteResponse, createJupiterApiClient } from '@jup-ag/api';
 import bs58 from 'bs58';
 
 export interface Env {
@@ -36,9 +38,9 @@ export interface Env {
 const nativeMint = "So11111111111111111111111111111111111111112";
 
 export type EventProcessingResult = {
-  txId: string;
+  txId: string | undefined;
   tokenMint: string;
-  quoteResponse?: any;
+  quoteResponse?: QuoteResponse;
 }
 
 export default <ExportedHandler<Env>>{
@@ -51,36 +53,55 @@ export default <ExportedHandler<Env>>{
     let response = new Response('Event received', {status: 200});
     try {
       const connection = new Connection(HELIUS_RPC_URL);
-      const requestBodyArray = (await request.json()) as any[];
+      const requestBodyArray = (await request.json()) as EnrichedTransaction[];
       const requestBody = requestBodyArray[0];
-      console.log(`Received request: ${JSON.stringify(requestBody, null, 2)}`);
-      const { description, type, events } = requestBody;
-      if(type === 'SWAP') {
-        const { swap, source } = events;
+      const { description, type, events, source } = requestBody;
+      console.log(`Message received: ${JSON.stringify(requestBody, null, 2)}`);
+      if(type === TransactionType.SWAP) {
+        const { swap } = events;
         if(swap){
-          const {txId, tokenMint} = await handleSwapEvent(connection, env, payer, swap);
-
-          let { timestamp, signature } = requestBody;
-          const timestampString = new Date(timestamp * 1000).toLocaleString(); // Convert Unix timestamp to readable date-time
-          signature = `https://xray.helius.xyz/tx/${signature}`
-          const rugcheckLink = `https://rugcheck.xyz/tokens/${tokenMint}`;
-          const dexScreenerLink = `https://dexscreener.com/solana/${tokenMint}`;
-          const txLink = `https://solscan.io/tx/${txId}`;
-          messageToSendTransfer = 
-          `----SWAP SUCCESS---\n`+
-          `Description:\n${description}\n`+
-          `Timestamp:\n${timestampString}\n`+
-          `Signature:\n${signature}\n`+
-          `Transaction Link:\n${txLink}\n`+
-          `Rugcheck Link:\n${rugcheckLink}\n`+
-          `DexScreener Link:\n${dexScreenerLink}\n`+
-          `Source: ${source}\n`;
+          const {txId, tokenMint, quoteResponse} = await handleSwapEvent(connection, env, payer, swap);
+          if(quoteResponse){
+            let { timestamp, signature } = requestBody;
+            const timestampString = new Date(timestamp * 1000).toLocaleString(); // Convert Unix timestamp to readable date-time
+            signature = `https://xray.helius.xyz/tx/${signature}`
+            const rugcheckLink = `https://rugcheck.xyz/tokens/${tokenMint}`;
+            const dexScreenerLink = `https://dexscreener.com/solana/${tokenMint}`;
+            const txLink = `https://solscan.io/tx/${txId}`;
+            const traderLink = `https://birdeye.so/profile/9wimuJr6t6WRH3XJoMGcWjjVabkaepRQxCsL6dh6V8Qw?chain=solana`;
+            messageToSendTransfer = 
+            `----SWAP SUCCESS---\n`+
+            `Trader: ${env.WALLET_PUBLIC_KEY}\n`+
+            `Description:\n${description}\n`+
+            `Timestamp:\n${timestampString}\n`+
+            `Signature:\n${signature}\n`+
+            `Transaction Link:\n${txLink}\n`+
+            `Rugcheck Link:\n${rugcheckLink}\n`+
+            `DexScreener Link:\n${dexScreenerLink}\n`+
+            `Source: ${source}\n`;
+          } else{
+            console.log(`Swap ignored: ${description}`);
+            messageToSendTransfer = 
+            `----SWAP IGNORED---\n`;
+            if(!description){
+              messageToSendTransfer += `${JSON.stringify(requestBody, null, 2)}`;
+            }else{
+              messageToSendTransfer += `${description}`;
+            }
+          }
         }
-      }
+      } 
+      // else {
+      //   const request = JSON.stringify(requestBody, null, 2);
+      //   console.log(`Message ignored: ${request}`);
+      //   messageToSendTransfer = 
+      //   `----MESSAGE IGNORED---\n`+
+      //   `${request}`;
+      // }
 
       response =  new Response('Logged.', {status: 200});
     } catch(e) {
-      console.log('Unknown Error:', e);
+      console.log('Some Error: ', e);
       messageToSendTransfer = 
       `----SWAP ERROR---\n`+
       `${JSON.stringify(e, null, 2)}\n`;
@@ -100,73 +121,77 @@ export default <ExportedHandler<Env>>{
       // `Timestamp:\n${new Date().toLocaleString()}\n` + 
       // `Swap Transaction:\n${JSON.stringify(swapTransaction, null, 2)}`;
       // await sendToTelegramBot(env, messageToSendSwap); // Send to Telegram
-const handleSwapEvent = async (connection: Connection, env: Env, payer: Keypair, swapEvent: any): Promise<EventProcessingResult> => {
+const handleSwapEvent = async (connection: Connection, env: Env, payer: Keypair, swapEvent: SwapEvent): Promise<EventProcessingResult> => {
   const {nativeInput, tokenInputs, tokenOutputs, nativeOutput } = swapEvent;
-  // const jupiterQuoteApi = createJupiterApiClient();
-  let tokenMint;
-    let quoteResponse;
-    console.log({swapEvent});
-    if (nativeInput && tokenOutputs.length > 0) {
-      quoteResponse = await getJupiterQuote(nativeMint, tokenOutputs[0].mint, nativeInput.amount);
-      tokenMint = tokenOutputs[0].mint;
-    } else if (tokenInputs.length > 0 && nativeOutput) {
-      quoteResponse = await getJupiterQuote(tokenInputs[0].mint, nativeMint, parseInt(tokenInputs[0].rawTokenAmount.tokenAmount));
-      tokenMint = tokenInputs[0].mint;
-    }
-    let txId = '';
-    console.log({quoteResponse});
-    // if(quoteResponse) {
-    //   const swapTransaction = await serializeJupiterTransaction(payer, quoteResponse);
-    //   console.log({swapTransaction});
-    //   // const transaction = signTransaction(payer, swapTransaction);
-    //   // txId = await executeTransaction(connection, transaction);
-    // }
-    return {
-      quoteResponse,
-      txId,
-      tokenMint: tokenOutputs[0].mint
+  const jupiterApi = createJupiterApiClient();
+  let tokenMint = '';
+  let quoteResponse;
+  if (nativeInput && tokenOutputs.length > 0) {
+    quoteResponse = await getJupiterQuote(jupiterApi, nativeMint, tokenOutputs[0].mint, env.MAX_SOL_BUY);//nativeInput.amount);
+    tokenMint = tokenOutputs[0].mint;
+  } else if (tokenInputs.length > 0 && nativeOutput) {
+    quoteResponse = await getJupiterQuote(jupiterApi, tokenInputs[0].mint, nativeMint, parseInt(tokenInputs[0].rawTokenAmount.tokenAmount));
+    tokenMint = tokenInputs[0].mint;
+  } else if (tokenInputs.length > 0 && tokenOutputs.length > 0) {
+    // quoteResponse = await getJupiterQuote(jupiterApi, tokenInputs[0].mint, tokenOutputs[0].mint, parseInt(tokenInputs[0].rawTokenAmount.tokenAmount));
+    // tokenMint = tokenOutputs[0].mint;
+  }
+  let txId = undefined;
+  if(quoteResponse) {
+    const swapTransaction = await serializeJupiterTransaction(jupiterApi, payer, quoteResponse);
+    const transaction = signTransaction(payer, swapTransaction);
+    // txId = await executeTransaction(connection, transaction);
+  }
+  return {
+    quoteResponse,
+    txId,
+    tokenMint
   };
 }
 
+// const raydiumSwap = async (connection: Connection, env: Env, payer: Keypair, swapEvent: SwapEvent): Promise<EventProcessingResult> => {
+
+//   return new Promise();
+// }
+
 // Write a function to execute a transaction using the Jupiter API
-const getJupiterQuote = async (inputMint: string, outputMint: string, amount: number): Promise<any> => {
-    // const quoteResponse = await jupiterQuoteApi.quoteGet({
-    //   inputMint,
-    //   outputMint,
-    //   amount,
-    //   computeAutoSlippage: true,
-    //   // platformFeeBps: 10,
-    //   // asLegacyTransaction: true, // legacy transaction, default is versoined transaction
-    // })
-    console.log({inputMint, outputMint, amount});
-    const url = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&computeAutoSlippage=true`;
-    console.log({url});
-    const quoteResponse = await (await fetch(url)).json();
+const getJupiterQuote = async (jupiterApi: DefaultApi, inputMint: string, outputMint: string, amount: number): Promise<QuoteResponse> => {
+    const quoteResponse = await jupiterApi.quoteGet({
+      inputMint,
+      outputMint,
+      amount,
+      computeAutoSlippage: true,
+      // platformFeeBps: 10,
+      // asLegacyTransaction: true, // legacy transaction, default is versoined transaction
+    })
+    if(quoteResponse && (quoteResponse as any).error) {
+      throw new Error(`Failed to get quote: ${(quoteResponse as any).error}`);
+    }
     return quoteResponse;
 } 
 
-// const serializeJupiterTransaction = async (jupiterQuoteApi: DefaultApi, payer: Keypair, quoteResponse: QuoteResponse): Promise<string> => {
-//   const { swapTransaction } = await jupiterQuoteApi.swapPost({
-//     swapRequest:{
-//       // quoteResponse from /quote api
-//       quoteResponse,
-//       // user public key to be used for the swap
-//       userPublicKey: payer.publicKey.toString(),
-//       // auto wrap and unwrap SOL. default is true
-//       // wrapAndUnwrapSol: true,
-//       prioritizationFeeLamports: 10000,
-//       // feeAccount is optional. Use if you want to charge a fee.  feeBps must have been passed in /quote API.
-//       // feeAccount: "fee_account_public_key"
-//     }
-//   })
-//   return swapTransaction;
-// }
+const serializeJupiterTransaction = async (jupiterApi: DefaultApi, payer: Keypair, quoteResponse: QuoteResponse): Promise<string> => {
+  const { swapTransaction } = await jupiterApi.swapPost({
+    swapRequest:{
+      // quoteResponse from /quote api
+      quoteResponse,
+      // user public key to be used for the swap
+      userPublicKey: payer.publicKey.toString(),
+      // auto wrap and unwrap SOL. default is true
+      // wrapAndUnwrapSol: true,
+      prioritizationFeeLamports: 10000,
+      // feeAccount is optional. Use if you want to charge a fee.  feeBps must have been passed in /quote API.
+      // feeAccount: "fee_account_public_key"
+    }
+  })
+  return swapTransaction;
+}
 
 const signTransaction = (payer: Keypair, swapTransaction: string): VersionedTransaction => {
   // deserialize the transaction
   const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
   const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-  console.log(transaction);
+  console.log({transaction});
 
   // sign the transaction
   transaction.sign([payer]);
