@@ -8,12 +8,44 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 
-// import * as Raydium from '@raydium-io/raydium-sdk';
-import { Buffer } from 'node:buffer';
-import { EnrichedTransaction, SwapEvent, TransactionType } from "helius-sdk";
-import { Connection, VersionedTransaction, TransactionSignature, Keypair, BlockheightBasedTransactionConfirmationStrategy } from '@solana/web3.js';
-import { DefaultApi, QuoteResponse, createJupiterApiClient } from '@jup-ag/api';
-import bs58 from 'bs58';
+import {
+  SwapInstructionsResponse,
+  SwapResponse,
+} from '@jup-ag/api';
+import {
+  Token,
+  TokenAmount,
+} from '@raydium-io/raydium-sdk';
+import {
+  Connection,
+  Keypair,
+} from '@solana/web3.js';
+
+import {
+  buildRpcUrl,
+  buildWallet,
+  DEFAULT_TOKEN,
+  newSplToken,
+  RpcProvider,
+} from './config';
+import { JupiterError } from './errors/jupiter-error';
+import { TransactionError } from './errors/transaction-error';
+// import { TransactionType } from './helius-enums';
+import {
+  EnrichedTransaction,
+  SwapEvent,
+} from './helius-types';
+import {
+  buildJupiterSwapInstructions,
+  buildJupiterSwapTransaction,
+} from './jupiter';
+import { sendToTelegramBot } from './telegram';
+import {
+  buildAndSignTransaction,
+  buildAndSignTransactionInstructions,
+  executeTransaction,
+} from './transaction-handler';
+import { getWalletTokenAmount } from './wallet';
 
 export interface Env {
 	// Example binding to KV. Learn more at https://developers.cloudflare.com/workers/runtime-apis/kv/
@@ -27,223 +59,243 @@ export interface Env {
 	//
 	// Example binding to a Service. Learn more at https://developers.cloudflare.com/workers/runtime-apis/service-bindings/
 	// MY_SERVICE: Fetcher;
-  TELEGRAM_CHAT_ID: number;
-  MAX_SOL_BUY: number;
-  HELIUS_API_KEY: string;
-  TELEGRAM_BOT_TOKEN: string;
-  WALLET_PUBLIC_KEY: string;
-  WALLET_PRIVATE_KEY: string;
+	TELEGRAM_CHAT_ID: number;
+	MAX_SOL_BUY: number;
+	MAX_USDC_BUY: number;
+	HELIUS_API_KEY: string;
+	QUICKNODE_API_KEY: string;
+	JUPITER_API_KEY: string;
+	TELEGRAM_BOT_TOKEN: string;
+	WALLET_PUBLIC_KEY: string;
+	WALLET_PRIVATE_KEY: string;
+	// ENABLE_FULL_TRADES: boolean;
+  ENABLE_EXECUTION: boolean;
 }
-
-const nativeMint = "So11111111111111111111111111111111111111112";
 
 export type EventProcessingResult = {
-  txId: string | undefined;
-  tokenMint: string;
-  quoteResponse?: QuoteResponse;
-}
-
-export default <ExportedHandler<Env>>{
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const payer = Keypair.fromSecretKey(bs58.decode(env.WALLET_PRIVATE_KEY || ''));
-    const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`;
-    // const helius = new Helius(env.HELIUS_API_KEY); // Initialize Helius SDK
-    // const HELIUS_WEBHOOK_URL = `https://api.helius.xyz/v0/webhooks/?api-key=${env.HELIUS_API_KEY}`;
-    let messageToSendTransfer = '';
-    let response = new Response('Event received', {status: 200});
-    try {
-      const connection = new Connection(HELIUS_RPC_URL);
-      const requestBodyArray = (await request.json()) as EnrichedTransaction[];
-      const requestBody = requestBodyArray[0];
-      const { description, type, events, source } = requestBody;
-      console.log(`Message received: ${JSON.stringify(requestBody, null, 2)}`);
-      if(type === TransactionType.SWAP) {
-        const { swap } = events;
-        if(swap){
-          const {txId, tokenMint, quoteResponse} = await handleSwapEvent(connection, env, payer, swap);
-          if(quoteResponse){
-            let { timestamp, signature } = requestBody;
-            const timestampString = new Date(timestamp * 1000).toLocaleString(); // Convert Unix timestamp to readable date-time
-            signature = `https://xray.helius.xyz/tx/${signature}`
-            const rugcheckLink = `https://rugcheck.xyz/tokens/${tokenMint}`;
-            const dexScreenerLink = `https://dexscreener.com/solana/${tokenMint}`;
-            const txLink = `https://solscan.io/tx/${txId}`;
-            const traderLink = `https://birdeye.so/profile/9wimuJr6t6WRH3XJoMGcWjjVabkaepRQxCsL6dh6V8Qw?chain=solana`;
-            messageToSendTransfer = 
-            `----SWAP SUCCESS---\n`+
-            `Trader: ${env.WALLET_PUBLIC_KEY}\n`+
-            `Description:\n${description}\n`+
-            `Timestamp:\n${timestampString}\n`+
-            `Signature:\n${signature}\n`+
-            `Transaction Link:\n${txLink}\n`+
-            `Rugcheck Link:\n${rugcheckLink}\n`+
-            `DexScreener Link:\n${dexScreenerLink}\n`+
-            `Source: ${source}\n`;
-          } else{
-            console.log(`Swap ignored: ${description}`);
-            messageToSendTransfer = 
-            `----SWAP IGNORED---\n`;
-            if(!description){
-              messageToSendTransfer += `${JSON.stringify(requestBody, null, 2)}`;
-            }else{
-              messageToSendTransfer += `${description}`;
-            }
-          }
-        }
-      } 
-      // else {
-      //   const request = JSON.stringify(requestBody, null, 2);
-      //   console.log(`Message ignored: ${request}`);
-      //   messageToSendTransfer = 
-      //   `----MESSAGE IGNORED---\n`+
-      //   `${request}`;
-      // }
-
-      response =  new Response('Logged.', {status: 200});
-    } catch(e) {
-      console.log('Some Error: ', e);
-      messageToSendTransfer = 
-      `----SWAP ERROR---\n`+
-      `${JSON.stringify(e, null, 2)}\n`;
-      response = new Response('Unknown Error', {status: 500});
-    } finally {
-      await sendToTelegramBot(env, messageToSendTransfer); // Send to Telegram
-    }
-    return response;
-  },
+	signature: string | undefined;
+	tokenMint: string;
 };
-      // const swapTransaction = await executeJupiterTransaction(quoteResponse);
-      // const { signature } = swapTransaction;
-      // const messageToSendSwap = 
-      // `----SWAP---\n`+
-      // `Description:\n${description}\n` +
-      // `Signature:\n${signature}\n` +
-      // `Timestamp:\n${new Date().toLocaleString()}\n` + 
-      // `Swap Transaction:\n${JSON.stringify(swapTransaction, null, 2)}`;
-      // await sendToTelegramBot(env, messageToSendSwap); // Send to Telegram
-const handleSwapEvent = async (connection: Connection, env: Env, payer: Keypair, swapEvent: SwapEvent): Promise<EventProcessingResult> => {
-  const {nativeInput, tokenInputs, tokenOutputs, nativeOutput } = swapEvent;
-  const jupiterApi = createJupiterApiClient();
-  let tokenMint = '';
-  let quoteResponse;
-  if (nativeInput && tokenOutputs.length > 0) {
-    quoteResponse = await getJupiterQuote(jupiterApi, nativeMint, tokenOutputs[0].mint, env.MAX_SOL_BUY);//nativeInput.amount);
-    tokenMint = tokenOutputs[0].mint;
-  } else if (tokenInputs.length > 0 && nativeOutput) {
-    quoteResponse = await getJupiterQuote(jupiterApi, tokenInputs[0].mint, nativeMint, parseInt(tokenInputs[0].rawTokenAmount.tokenAmount));
-    tokenMint = tokenInputs[0].mint;
-  } else if (tokenInputs.length > 0 && tokenOutputs.length > 0) {
-    // quoteResponse = await getJupiterQuote(jupiterApi, tokenInputs[0].mint, tokenOutputs[0].mint, parseInt(tokenInputs[0].rawTokenAmount.tokenAmount));
-    // tokenMint = tokenOutputs[0].mint;
-  }
-  let txId = undefined;
-  if(quoteResponse) {
-    const swapTransaction = await serializeJupiterTransaction(jupiterApi, payer, quoteResponse);
-    const transaction = signTransaction(payer, swapTransaction);
-    // txId = await executeTransaction(connection, transaction);
-  }
+
+export type WorkerContext = {
+  connection: Connection;
+  env: Env;
+  wallet: Keypair;
+}
+
+addEventListener('fetch', (event) => {
+	event.respondWith(handleRequest(event));
+});
+
+const maxRetries = 25;
+
+const buildWorkerContext = (): WorkerContext => {
+  const env = {
+		// @ts-ignore - These values will be set by Wrangler
+		TELEGRAM_CHAT_ID: TELEGRAM_CHAT_ID,
+		// @ts-ignore - These values will be set by Wrangler
+		MAX_SOL_BUY: MAX_SOL_BUY,
+		// @ts-ignore - These values will be set by Wrangler
+		MAX_USDC_BUY: MAX_USDC_BUY,
+		// @ts-ignore - These values will be set by Wrangler
+		HELIUS_API_KEY: HELIUS_API_KEY,
+		// @ts-ignore - These values will be set by Wrangler
+		QUICKNODE_API_KEY: QUICKNODE_API_KEY,
+		// @ts-ignore - These values will be set by Wrangler
+		TELEGRAM_BOT_TOKEN: TELEGRAM_BOT_TOKEN,
+		// @ts-ignore - These values will be set by Wrangler
+		WALLET_PUBLIC_KEY: WALLET_PUBLIC_KEY,
+		// @ts-ignore - These values will be set by Wrangler
+		WALLET_PRIVATE_KEY: WALLET_PRIVATE_KEY,
+		// @ts-ignore - These values will be set by Wrangler
+		JUPITER_API_KEY: JUPITER_API_KEY,
+		// @ts-ignore - These values will be set by Wrangler
+    ENABLE_EXECUTION: ENABLE_EXECUTION,
+	};
+	const wallet = buildWallet(env.WALLET_PRIVATE_KEY);
+	const RPC_URL = buildRpcUrl(env, RpcProvider.QUICKNODE);
+  const connection = new Connection(RPC_URL);
+  // await connection.getSlot();
   return {
-    quoteResponse,
-    txId,
-    tokenMint
-  };
-}
-
-// const raydiumSwap = async (connection: Connection, env: Env, payer: Keypair, swapEvent: SwapEvent): Promise<EventProcessingResult> => {
-
-//   return new Promise();
-// }
-
-// Write a function to execute a transaction using the Jupiter API
-const getJupiterQuote = async (jupiterApi: DefaultApi, inputMint: string, outputMint: string, amount: number): Promise<QuoteResponse> => {
-    const quoteResponse = await jupiterApi.quoteGet({
-      inputMint,
-      outputMint,
-      amount,
-      computeAutoSlippage: true,
-      // platformFeeBps: 10,
-      // asLegacyTransaction: true, // legacy transaction, default is versoined transaction
-    })
-    if(quoteResponse && (quoteResponse as any).error) {
-      throw new Error(`Failed to get quote: ${(quoteResponse as any).error}`);
-    }
-    return quoteResponse;
-} 
-
-const serializeJupiterTransaction = async (jupiterApi: DefaultApi, payer: Keypair, quoteResponse: QuoteResponse): Promise<string> => {
-  const { swapTransaction } = await jupiterApi.swapPost({
-    swapRequest:{
-      // quoteResponse from /quote api
-      quoteResponse,
-      // user public key to be used for the swap
-      userPublicKey: payer.publicKey.toString(),
-      // auto wrap and unwrap SOL. default is true
-      // wrapAndUnwrapSol: true,
-      prioritizationFeeLamports: 10000,
-      // feeAccount is optional. Use if you want to charge a fee.  feeBps must have been passed in /quote API.
-      // feeAccount: "fee_account_public_key"
-    }
-  })
-  return swapTransaction;
-}
-
-const signTransaction = (payer: Keypair, swapTransaction: string): VersionedTransaction => {
-  // deserialize the transaction
-  const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
-  const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-  console.log({transaction});
-
-  // sign the transaction
-  transaction.sign([payer]);
-  return transaction;
-}
-
-const executeTransaction = async (connection: Connection, transaction: VersionedTransaction): Promise<TransactionSignature> => {
-  // Execute the transaction
-  const rawTransaction = transaction.serialize();
-  const signature = await connection.sendRawTransaction(rawTransaction);
-  const latestBlockHash = await connection.getLatestBlockhash()
-  const confirmStrategy: BlockheightBasedTransactionConfirmationStrategy = {
-      blockhash: latestBlockHash.blockhash,
-      lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
-      signature: signature
+    connection,
+    env,
+    wallet,
   }
-  const confirmTransactionResult = await connection.confirmTransaction(confirmStrategy);
-  console.log({confirmTransactionResult});
+}
+
+const handleRequest = async (event: FetchEvent) => {
+	let messageToSendTransfer = '';
+	let response = new Response('Event received', { status: 200 });
+  const wc = buildWorkerContext();
+	try {
+		const requestBodyArray = (await event.request.json()) as EnrichedTransaction[];
+		const requestBody = requestBodyArray[0];
+		const { type, events, source } = requestBody;
+
+		if (type === 'SWAP' && events) {
+      
+			const { swap: swapEvent } = events;
+			if (swapEvent) {
+				messageToSendTransfer = await processSwapEvent(wc, source, swapEvent, requestBody);
+			} else {
+        messageToSendTransfer = `----SWAP ERROR---\n` + `Swap event not found\n`;
+      }
+		}
+		// else {
+		//   const request = JSON.stringify(requestBody, null, 2);
+		//   console.log(`Message ignored: ${request}`);
+		//   messageToSendTransfer =
+		//   `----MESSAGE IGNORED---\n`+
+		//   `${request}`;
+		// }
+
+		response = new Response('Logged.', { status: 200 });
+	} catch (e) {
+		console.log('Some Error: ', e);
+		messageToSendTransfer = `----SWAP ERROR---\n` + `${JSON.stringify((e as Error).message, null, 2)}\n`;
+		response = new Response('Unknown Error', { status: 500 });
+	} finally {
+		await sendToTelegramBot(wc, messageToSendTransfer); // Send to Telegram
+	}
+	return response;
+};
+// const swapTransaction = await executeJupiterTransaction(quoteResponse);
+// const { signature } = swapTransaction;
+// const messageToSendSwap =
+// `----SWAP---\n`+
+// `Description:\n${description}\n` +
+// `Signature:\n${signature}\n` +
+// `Timestamp:\n${new Date().toLocaleString()}\n` +
+// `Swap Transaction:\n${JSON.stringify(swapTransaction, null, 2)}`;
+// await sendToTelegramBot(env, messageToSendSwap); // Send to Telegram
+const processSwapEvent = async (
+	wc: WorkerContext,
+	source: String,
+	swapEvent: SwapEvent,
+  requestBody: EnrichedTransaction,
+): Promise<string> => {
+  const { inputTokenAmount, outputToken, tokenMint } = await extractInputOutputTokens(wc, swapEvent);
+	let signature;
+	if (inputTokenAmount && outputToken) {
+    // if(source === 'JUPITER'){
+      signature = await processSwapEventJupiter(wc, inputTokenAmount, outputToken);
+    // }
+	}
+  let messageToSendTransfer;
+  let { timestamp, description, feePayer } = requestBody;
+  if (signature) {
+    const timestampString = new Date(timestamp * 1000).toLocaleString(); // Convert Unix timestamp to readable date-time
+    // const signatureLink = `https://xray.helius.xyz/tx/${signature}`;
+    const rugcheckLink = `https://rugcheck.xyz/tokens/${tokenMint}`;
+    const dexScreenerLink = `https://dexscreener.com/solana/${tokenMint}`;
+    const solscanLink = `https://solscan.io/tx/${signature}`;
+    const explorerLink = `https://explorer.solana.com/tx/${signature}`;
+    const traderLink = `https://birdeye.so/profile/${feePayer}?chain=solana`;
+    messageToSendTransfer =
+      `----SWAP SUCCESS---\n` +
+      `Trader: ${feePayer}\n${traderLink}\n` +
+      `Description:\n${description}\n` +
+      `Timestamp:\n${timestampString}\n` +
+      // `Signature:\n${signatureLink}\n` +
+      `Transaction Links:\n${solscanLink}\n${explorerLink}\n` +
+      `Rugcheck Link:\n${rugcheckLink}\n` +
+      `DexScreener Link:\n${dexScreenerLink}\n` +
+      `Signer: ${wc.wallet.publicKey.toBase58()}\n`+
+      `Source: ${source}\n`;
+  } else {
+    console.log(`Swap ignored: ${description}`);
+    messageToSendTransfer = `----SWAP NOT EXECUTED---\nSource: ${source}\n`;
+    if (!description) {
+      messageToSendTransfer += `${JSON.stringify(requestBody, null, 2)}`;
+    } else {
+      messageToSendTransfer += `${description}\n`;
+    }
+  }
+	return messageToSendTransfer;
+};
+
+const processSwapEventJupiter = async (wc: WorkerContext, inputTokenAmount: TokenAmount, outputToken: Token): Promise<string | undefined> => {
+  const { connection, env, wallet } = wc;
+  let swapResponse;
+	let swapSuccess;
+	const MAX_NUM_ATTEMPTS = 5;
+	let attempts = 0;
+  const useInstructions = false;
+  let signature;
+  while (swapSuccess !== true && attempts <= MAX_NUM_ATTEMPTS) {
+    try {
+      if (useInstructions) {
+        swapResponse = await buildJupiterSwapInstructions(env, wallet, inputTokenAmount, outputToken);
+      } else {
+        swapResponse = await buildJupiterSwapTransaction(env, wallet, inputTokenAmount, outputToken);
+      }
+
+      if (swapResponse) {
+        let signingResult;
+        if (useInstructions) {
+          signingResult = await buildAndSignTransactionInstructions(connection, wallet, swapResponse as SwapInstructionsResponse);
+        } else {
+          signingResult = buildAndSignTransaction(wallet, swapResponse as SwapResponse);
+        }
+        if(env.ENABLE_EXECUTION === true){
+          signature = await executeTransaction(connection, signingResult);
+        } else {
+          signature = 'notexecuted';
+        }
+
+        break;
+      }
+    } catch (e) {
+      if ((e instanceof TransactionError || e instanceof JupiterError) && attempts >= MAX_NUM_ATTEMPTS) {
+        console.log(`Transaction failed after ${MAX_NUM_ATTEMPTS} attempts: ${e.message}`);
+        throw e;
+      } else if (!(e instanceof TransactionError || e instanceof JupiterError)) {
+        throw e;
+      } else {
+        console.log(`Attempt ${attempts} failed. Retrying... ${e.message}`);
+      }
+    } finally {
+      attempts += 1;
+    }
+  }
   return signature;
 }
 
-
-async function sendToTelegramBot(env: Env, message: string) {
-	const TELEGRAM_BOT_URL = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
-	const response = await fetch(`${TELEGRAM_BOT_URL}/sendMessage`, {
-	  method: 'POST',
-	  headers: {
-		  'Content-Type': 'application/json',
-	  },
-	  body: JSON.stringify({
-      chat_id: env.TELEGRAM_CHAT_ID,
-      text: message, 
-      parse_mode: "HTML"
-	  }),
-	});
-	const responseData = await response.json();
-
-	if (!response.ok) {
-	  throw new Error(`Failed to send message to Telegram: ${JSON.stringify(responseData, null, 2)}`);
+const extractInputOutputTokens = async (wc: WorkerContext, swapEvent: SwapEvent): Promise<{inputTokenAmount: TokenAmount, outputToken: Token, tokenMint: string}> => {
+  const { nativeInput, nativeOutput, tokenInputs, tokenOutputs } = swapEvent;
+	let inputTokenAmount: TokenAmount | undefined;
+	let outputToken: Token | undefined;
+	let tokenMint: string | undefined;
+	if (nativeInput && tokenOutputs.length > 0) {
+		tokenMint = tokenOutputs[0].mint;
+		// const amount = nativeInput.amount;
+		inputTokenAmount = new TokenAmount(DEFAULT_TOKEN.WSOL, wc.env.MAX_SOL_BUY);
+		// outputToken = DEFAULT_TOKEN.USDC;
+		outputToken = newSplToken(tokenOutputs[0].mint, tokenOutputs[0].rawTokenAmount.decimals);
+	} else if (tokenInputs.length > 0 && nativeOutput) {
+		tokenMint = tokenInputs[0].mint;
+    // Obtain token balance from the wallet
+    inputTokenAmount = await getWalletTokenAmount(wc.connection, tokenInputs[0].mint, wc.wallet.publicKey);
+		// const { decimals } = tokenInputs[0].rawTokenAmount;
+		// inputTokenAmount = newTokenAmount(tokenInputs[0].mint, tokenBalance.value.amount, decimals);
+		// inputTokenAmount = new TokenAmount(DEFAULT_TOKEN.USDC, env.MAX_USDC_BUY);
+		outputToken = DEFAULT_TOKEN.WSOL;
+		//  inputTokenAmount = newTokenAmount(tokenInputs[0].mint, tokenInputs[0].rawTokenAmount.tokenAmount, tokenInputs[0].rawTokenAmount.decimals);
+	} else if (tokenInputs.length > 0 && tokenOutputs.length > 0) {
+		// quoteResponse = await getJupiterQuote(jupiterApi, tokenInputs[0].mint, tokenOutputs[0].mint, parseInt(tokenInputs[0].rawTokenAmount.tokenAmount));
+		// tokenMint = tokenOutputs[0].mint;
 	}
-  return responseData;
+  console.log(`Input Token Amount: ${JSON.stringify(inputTokenAmount, null, 2)}`);
+  console.log(`Output Token: ${JSON.stringify(outputToken, null, 2)}`);
+  console.log(`Token Mint: ${tokenMint}`);
+
+  if(!inputTokenAmount || !outputToken || !tokenMint){
+    let errorMessage = `SWAP TYPE NOT SUPPORTED`;
+    if(!inputTokenAmount){
+      errorMessage = `Token balance not found for ${tokenMint}`;
+    }
+    throw new Error(`${errorMessage}`);
+  }
+
+  return {inputTokenAmount, outputToken, tokenMint};
 }
-
-// const editWebhook = async (helius: Helius, accountAddresses: string[]): Promise<Webhook> => {
-//   const webhookID = "f07b6cc6-5631-46e8-837d-f1ff3239d5a1";
-//   const webhookURL = "https://solana-bot-worker-63b7.thomas-sodon.workers.dev";
-
-//    const webhook = await helius.editWebhook(webhookID, {
-//       webhookURL: "https://solana-bot-worker-63b7.thomas-sodon.workers.dev",
-//       transactionTypes: [TransactionType.ANY],
-//       accountAddresses,
-//       webhookType: WebhookType.ENHANCED
-//     });
-//   return webhook;
-// };
