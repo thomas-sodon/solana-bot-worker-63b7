@@ -19,6 +19,7 @@ import {
 import {
   Connection,
   Keypair,
+  SolanaJSONRPCError,
 } from '@solana/web3.js';
 
 import {
@@ -30,6 +31,10 @@ import {
 } from './config';
 import { JupiterError } from './errors/jupiter-error';
 import { TransactionError } from './errors/transaction-error';
+import {
+  WorkerError,
+  WorkerErrorType,
+} from './errors/worker-error';
 // import { TransactionType } from './helius-enums';
 import {
   EnrichedTransaction,
@@ -83,8 +88,12 @@ export type WorkerContext = {
   wallet: Keypair;
 }
 
-addEventListener('fetch', (event) => {
-	event.respondWith(handleRequest(event));
+addEventListener('fetch', event => {
+  event.respondWith(async function () {
+    const request = (await event.request.json());
+    event.waitUntil(handleRequest(request));
+    return new Response('Processing', { status: 200 });
+  }());
 });
 
 const maxRetries = 25;
@@ -123,66 +132,98 @@ const buildWorkerContext = (): WorkerContext => {
   }
 }
 
-const handleRequest = async (event: FetchEvent) => {
+export const progressIndicator = {
+  orange: `\u{1F7E0}`,
+  red: `\u{1F534}`,
+  yellow: `\u{1F7E1}`,
+  green: `\u{1F7E2}`,
+  blue: `\u{1F535}`,
+  purple: `\u{1F7E3}`,
+  white: `\u{25CB}`,
+}
+
+export enum SwapProgress {
+  SUCCESS = '\u{1F7E2} ----SWAP SUCCESS---',
+  NOT_EXECUTED = `\u{1F7E0} ----SWAP NOT EXECUTED---`,
+  ERROR = `\u{1F534} ----SWAP ERROR---`,
+  IGNORED = `\u{25CB} ----MESSAGE IGNORED---`,
+  SWAP_INVALID = `\u{1F7E1} ----SWAP INVALID---`,
+  SWAP_IGNORED = `\u{1F7E3} ----SWAP IGNORED---`,
+  PROCESSING = `\u{1F535} Processing`,
+}
+
+const handleRequest = async (event: any) => {
 	let messageToSendTransfer = '';
 	let response = new Response('Event received', { status: 200 });
   const wc = buildWorkerContext();
+
+  let description;
 	try {
-		const requestBodyArray = (await event.request.json()) as EnrichedTransaction[];
+    const requestBodyArray = event as EnrichedTransaction[];
 		const requestBody = requestBodyArray[0];
 		const { type, events, source } = requestBody;
-
+    ({description} = requestBody);
+    sendToTelegramBot(wc, `${SwapProgress.PROCESSING.toString()}: ${description}`); // Send to Telegram
 		if (type === 'SWAP' && events) {
-      
 			const { swap: swapEvent } = events;
 			if (swapEvent) {
 				messageToSendTransfer = await processSwapEvent(wc, source, swapEvent, requestBody);
 			} else {
-        messageToSendTransfer = `----SWAP ERROR---\n` + `Swap event not found\n`;
+        messageToSendTransfer = `${SwapProgress.ERROR.toString()}\n` + `Swap event not found\n`;
       }
 		}
-		// else {
-		//   const request = JSON.stringify(requestBody, null, 2);
-		//   console.log(`Message ignored: ${request}`);
-		//   messageToSendTransfer =
-		//   `----MESSAGE IGNORED---\n`+
-		//   `${request}`;
-		// }
-
+		else {
+      const requestJson = JSON.stringify(requestBody, null, 2);
+      const ignoredMessage = `${SwapProgress.IGNORED.toString()}\n` +
+      `${requestJson}\n`;
+      console.log(ignoredMessage);
+		  messageToSendTransfer =
+		  `${ignoredMessage}`;
+		}
 		response = new Response('Logged.', { status: 200 });
 	} catch (e) {
-		console.log('Some Error: ', e);
-		messageToSendTransfer = `----SWAP ERROR---\n` + `${JSON.stringify((e as Error).message, null, 2)}\n`;
+    if((e instanceof SolanaJSONRPCError && e.message.includes('could not find account')) || (e instanceof WorkerError && e.workerErrorType === WorkerErrorType.NO_TOKEN_BALANCE) ){
+      messageToSendTransfer =
+      `${SwapProgress.SWAP_INVALID.toString()}\n` +
+      `${description}\n`;
+    } else {
+      console.log(`Event Errored: ${JSON.stringify(event, null, 2)}`);
+      messageToSendTransfer =
+      `${SwapProgress.ERROR.toString()}\n` +
+      `${description}\n` +
+      `${JSON.stringify((e as Error).message, null, 2)}\n`+
+      `${JSON.stringify((e as Error).stack, null, 2)}\n`;
+    }
+    console.log('Some Error: ', messageToSendTransfer);
 		response = new Response('Unknown Error', { status: 500 });
 	} finally {
 		await sendToTelegramBot(wc, messageToSendTransfer); // Send to Telegram
 	}
 	return response;
 };
-// const swapTransaction = await executeJupiterTransaction(quoteResponse);
-// const { signature } = swapTransaction;
-// const messageToSendSwap =
-// `----SWAP---\n`+
-// `Description:\n${description}\n` +
-// `Signature:\n${signature}\n` +
-// `Timestamp:\n${new Date().toLocaleString()}\n` +
-// `Swap Transaction:\n${JSON.stringify(swapTransaction, null, 2)}`;
-// await sendToTelegramBot(env, messageToSendSwap); // Send to Telegram
+
 const processSwapEvent = async (
 	wc: WorkerContext,
 	source: String,
 	swapEvent: SwapEvent,
   requestBody: EnrichedTransaction,
 ): Promise<string> => {
+  let { timestamp, description, feePayer } = requestBody;
+  console.log(`Processing Swap Event: ${description}`);
   const { inputTokenAmount, outputToken, tokenMint } = await extractInputOutputTokens(wc, swapEvent);
+  console.log('extractInputOutputTokens');
+  console.log(`Input Token Amount: ${JSON.stringify(inputTokenAmount, null, 2)}`);
+  console.log(`Output Token: ${JSON.stringify(outputToken, null, 2)}`);
+  console.log(`Token Mint: ${tokenMint}`);
 	let signature;
 	if (inputTokenAmount && outputToken) {
     // if(source === 'JUPITER'){
       signature = await processSwapEventJupiter(wc, inputTokenAmount, outputToken);
+      console.log('processSwapEventJupiter');
     // }
 	}
   let messageToSendTransfer;
-  let { timestamp, description, feePayer } = requestBody;
+
   if (signature) {
     const timestampString = new Date(timestamp * 1000).toLocaleString(); // Convert Unix timestamp to readable date-time
     // const signatureLink = `https://xray.helius.xyz/tx/${signature}`;
@@ -192,7 +233,7 @@ const processSwapEvent = async (
     const explorerLink = `https://explorer.solana.com/tx/${signature}`;
     const traderLink = `https://birdeye.so/profile/${feePayer}?chain=solana`;
     messageToSendTransfer =
-      `----SWAP SUCCESS---\n` +
+      `${SwapProgress.SUCCESS.toString()}\n` +
       `Trader: ${feePayer}\n${traderLink}\n` +
       `Description:\n${description}\n` +
       `Timestamp:\n${timestampString}\n` +
@@ -200,17 +241,17 @@ const processSwapEvent = async (
       `Transaction Links:\n${solscanLink}\n${explorerLink}\n` +
       `Rugcheck Link:\n${rugcheckLink}\n` +
       `DexScreener Link:\n${dexScreenerLink}\n` +
-      `Signer: ${wc.wallet.publicKey.toBase58()}\n`+
       `Source: ${source}\n`;
   } else {
     console.log(`Swap ignored: ${description}`);
-    messageToSendTransfer = `----SWAP NOT EXECUTED---\nSource: ${source}\n`;
+    messageToSendTransfer = `${SwapProgress.IGNORED.toString()}\nSource: ${source}\n`;
     if (!description) {
       messageToSendTransfer += `${JSON.stringify(requestBody, null, 2)}`;
     } else {
       messageToSendTransfer += `${description}\n`;
     }
   }
+  console.log('processSwapEvent')
 	return messageToSendTransfer;
 };
 
@@ -224,11 +265,14 @@ const processSwapEventJupiter = async (wc: WorkerContext, inputTokenAmount: Toke
   let signature;
   while (swapSuccess !== true && attempts <= MAX_NUM_ATTEMPTS) {
     try {
+      console.log('buildJupiterSwap before');
       if (useInstructions) {
         swapResponse = await buildJupiterSwapInstructions(env, wallet, inputTokenAmount, outputToken);
       } else {
         swapResponse = await buildJupiterSwapTransaction(env, wallet, inputTokenAmount, outputToken);
       }
+
+      console.log('buildJupiterSwap');
 
       if (swapResponse) {
         let signingResult;
@@ -238,11 +282,11 @@ const processSwapEventJupiter = async (wc: WorkerContext, inputTokenAmount: Toke
           signingResult = buildAndSignTransaction(wallet, swapResponse as SwapResponse);
         }
         if(env.ENABLE_EXECUTION === true){
-          signature = await executeTransaction(connection, signingResult);
+          signature = await executeTransaction(wc, signingResult);
+          console.log('executeTransaction');
         } else {
           signature = 'notexecuted';
         }
-
         break;
       }
     } catch (e) {
@@ -285,16 +329,15 @@ const extractInputOutputTokens = async (wc: WorkerContext, swapEvent: SwapEvent)
 		// quoteResponse = await getJupiterQuote(jupiterApi, tokenInputs[0].mint, tokenOutputs[0].mint, parseInt(tokenInputs[0].rawTokenAmount.tokenAmount));
 		// tokenMint = tokenOutputs[0].mint;
 	}
-  console.log(`Input Token Amount: ${JSON.stringify(inputTokenAmount, null, 2)}`);
-  console.log(`Output Token: ${JSON.stringify(outputToken, null, 2)}`);
-  console.log(`Token Mint: ${tokenMint}`);
+  // console.log(`Input Token Amount: ${JSON.stringify(inputTokenAmount, null, 2)}`);
+  // console.log(`Output Token: ${JSON.stringify(outputToken, null, 2)}`);
+  // console.log(`Token Mint: ${tokenMint}`);
 
   if(!inputTokenAmount || !outputToken || !tokenMint){
-    let errorMessage = `SWAP TYPE NOT SUPPORTED`;
     if(!inputTokenAmount){
-      errorMessage = `Token balance not found for ${tokenMint}`;
+      throw new WorkerError(WorkerErrorType.SWAP_NOT_SUPPORTED, `Token balance not found for ${tokenMint}`);
     }
-    throw new Error(`${errorMessage}`);
+    throw new WorkerError(WorkerErrorType.SWAP_NOT_SUPPORTED, `Swap not currently supported`);
   }
 
   return {inputTokenAmount, outputToken, tokenMint};

@@ -12,7 +12,7 @@ const config = {
         filename: 'worker.js'
     },
     optimization: {
-        minimize: true,
+        minimize: false,
     },
     plugins: [
         // new CopyPlugin([

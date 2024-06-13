@@ -1,0 +1,23 @@
+{
+    "update_id": 759314433,
+    "message": {
+      "message_id": 4645,
+      "from": {
+        "id": 6902486057,
+        "is_bot": false,
+        "first_name": "Thomas",
+        "last_name": "Sodon",
+        "username": "thomas_sodon",
+        "language_code": "en"
+      },
+      "chat": {
+        "id": 6902486057,
+        "first_name": "Thomas",
+        "last_name": "Sodon",
+        "username": "thomas_sodon",
+        "type": "private"
+      },
+      "date": 1713066351,
+      "text": "STOP"
+    }
+  }

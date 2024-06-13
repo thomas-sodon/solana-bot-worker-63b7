@@ -20,15 +20,10 @@ import {
 } from '@solana/web3.js';
 
 import {
-  TRANSACTION_ERROR_TYPES,
   TransactionError,
+  TransactionErrorType,
 } from './errors/transaction-error';
-
-export const TRANSACTION_RESULT = {
-	...TRANSACTION_ERROR_TYPES,
-	SUCCESS: 'Transaction succeeded',
-};
-Object.freeze(TRANSACTION_RESULT);
+import { WorkerContext } from './worker';
 
 export type SigningResult = {
 	rawTransaction: Uint8Array;
@@ -83,25 +78,25 @@ export const buildAndSignTransaction = (wallet: Keypair, swapResponse: SwapRespo
 	};
 };
 
-export const executeTransaction = async (connection: Connection, signingResult: SigningResult): Promise<TransactionSignature> => {
+export const executeTransaction = async (wc: WorkerContext, signingResult: SigningResult): Promise<TransactionSignature> => {
 	const { rawTransaction, lastValidBlockHeight, signature } = signingResult;
-	let blockheight = await connection.getBlockHeight();
+	let blockheight = await wc.connection.getBlockHeight();
 	const startTime = new Date();
 	let txSuccess = false;
 	while (blockheight < lastValidBlockHeight) {
-		connection.sendRawTransaction(rawTransaction, {
+		wc.connection.sendRawTransaction(rawTransaction, {
 			skipPreflight: true,
 			// maxRetries: 0,
 		});
-		await sleep(2500);
-		txSuccess = await checkSignatureStatus(connection, signature, startTime);
+		await sleep(1500);
+		txSuccess = await checkSignatureStatus(wc.connection, signature, startTime);
 		if (txSuccess) {
 			break;
 		}
-		blockheight = await connection.getBlockHeight();
+		blockheight = await wc.connection.getBlockHeight();
 	}
 	if (!txSuccess) {
-		throw new TransactionError(TRANSACTION_ERROR_TYPES.BLOCKHASH_EXPIRED, `${logElapsedTime(startTime, signature)}`);
+		throw new TransactionError(TransactionErrorType.BLOCKHASH_EXPIRED, `${logElapsedTime(startTime, signature)}`);
 	}
 	return signature;
 };
@@ -125,7 +120,7 @@ const logElapsedTime = (startTime: Date, signature: string, status?: SignatureSt
 	return `Elapsed time: ${elapsed} seconds for ${signature} with status (${JSON.stringify(status, null, 2)})`;
 };
 
-const checkSignatureStatus = async (connection: Connection, signature: string, startTime: Date) => {
+const checkSignatureStatus = async (connection: Connection, signature: string, startTime: Date): Promise<boolean> => {
 	const { value: status } = await connection.getSignatureStatus(signature);
 	let txSuccess = false;
 	if (status && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
@@ -133,13 +128,13 @@ const checkSignatureStatus = async (connection: Connection, signature: string, s
 		const someError = status.err as any;
 		if (someError) {
 			if (someError.InstructionError && someError.InstructionError.length >= 2 && someError.InstructionError[1].Custom === 6001) {
-				throw new TransactionError(TRANSACTION_ERROR_TYPES.SLIPPAGE, `${logElapsedTime(startTime, signature, status)}`);
+				throw new TransactionError(TransactionErrorType.SLIPPAGE, `${logElapsedTime(startTime, signature, status)}`);
 			}
-			throw new TransactionError(TRANSACTION_ERROR_TYPES.UNKNOWN, `${logElapsedTime(startTime, signature, status)}`);
+			throw new TransactionError(TransactionErrorType.BLOCKHASH_EXPIRED, `${logElapsedTime(startTime, signature, status)}`);
 		}
-		console.log(`${TRANSACTION_RESULT.SUCCESS}. ${logElapsedTime(startTime, signature, status)}`);
+		console.log(`Transaction succeeded! ${logElapsedTime(startTime, signature, status)}`);
 	} else if (status) {
-		console.log(`Status for ${signature}: ${JSON.stringify(status, null, 2)}`);
+		console.log(`Interim status for ${signature}: ${JSON.stringify(status, null, 2)}`);
 	}
 	return txSuccess;
 };

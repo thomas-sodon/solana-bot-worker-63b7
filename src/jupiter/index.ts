@@ -32,7 +32,9 @@ export async function buildJupiterSwapInstructions(env: Env, payer: Keypair, inp
   const jupiterApi = createJupiterApiClient({
     basePath: buildBasePath(env.JUPITER_API_KEY),
   });
+  console.log('getJupiterQuote: ')
   const quoteResponse = await getJupiterQuote(jupiterApi, inputTokenAmount.token.mint.toString(), outputToken.mint.toString(), inputTokenAmount.raw.toString(10));
+  console.log('getJupiterSwapInstructions: ')
   return getJupiterSwapInstructions(jupiterApi, payer, quoteResponse);
 }
 
