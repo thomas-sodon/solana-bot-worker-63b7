@@ -26,7 +26,7 @@ export enum RpcProvider {
 export const buildRpcUrl = (env: Env, rpcProvider: RpcProvider) => {
   switch (rpcProvider) {
     case RpcProvider.QUICKNODE:
-      return `https://black-holy-flower.solana-mainnet.quiknode.pro/${env.QUICKNODE_API_KEY}/`;
+      return `https://${env.QUICKNODE_HOST}/${env.QUICKNODE_API_KEY}/`;
     case RpcProvider.HELIUS:
       return `https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`;;
   }

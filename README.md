@@ -1,3 +1,5 @@
+> **Archived prototype.** Superseded by [aws-sam-solana-bot](https://github.com/thomas-sodon/aws-sam-solana-bot), which is the maintained version of this copy-trading bot.
+
  - npm install
  - wrangler login
  - npm run watch

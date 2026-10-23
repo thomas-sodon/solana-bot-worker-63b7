@@ -68,6 +68,7 @@ export interface Env {
 	MAX_SOL_BUY: number;
 	MAX_USDC_BUY: number;
 	HELIUS_API_KEY: string;
+	QUICKNODE_HOST: string;
 	QUICKNODE_API_KEY: string;
 	JUPITER_API_KEY: string;
 	TELEGRAM_BOT_TOKEN: string;

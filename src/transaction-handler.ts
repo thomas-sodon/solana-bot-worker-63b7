@@ -102,7 +102,7 @@ export const executeTransaction = async (wc: WorkerContext, signingResult: Signi
 };
 
 // const editWebhook = async (helius: Helius, accountAddresses: string[]): Promise<Webhook> => {
-//   const webhookID = "f07b6cc6-5631-46e8-837d-f1ff3239d5a1";
+//   const webhookID = "<your-helius-webhook-id>";
 //   const webhookURL = "https://solana-bot-worker-63b7.thomas-sodon.workers.dev";
 
 //    const webhook = await helius.editWebhook(webhookID, {
